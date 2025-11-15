@@ -43,6 +43,7 @@ fec-ldpc-codec
 ├── images/              # BER plots (PNG/SVG)
 ├── python/              # Plotting scripts
 ├── .github/workflows/   # CI (GCC build)
+├── Makefile             # Build rules
 └── README.md            # This document
 ```
 
