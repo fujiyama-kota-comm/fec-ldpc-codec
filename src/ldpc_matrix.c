@@ -1,270 +1,293 @@
+/**
+ * @file ldpc_matrix.c
+ * @brief LDPC parity-check matrix (H) and generator matrix (G) utilities
+ *
+ * This file contains:
+ *   - Gallager-type regular LDPC H-matrix generation
+ *   - Systematic generator matrix G construction (via Gaussian elimination)
+ *   - 4-cycle counting utility (analysis of LDPC structure)
+ *
+ * すべて行列演算は GF(2)（XOR）で行われます。
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "ldpc_matrix.h"
 
-// Gallager法により(N_LDPC*w_c/w_r)×(N_LDPC)の検査行列を生成
-void generate_Hmatrix(int **H_LDPC, int N_LDPC, int w_c, int w_r) {
-  // ローカル変数の定義
-  int i, j, k, l, m;          // カウント用
-  int buf;                    // 一時保存用
-  int M = N_LDPC * w_c / w_r; // 検査行列の行数
-  int N = N_LDPC;             // 検査行列の列数
-  int B_M = M / w_c; // 検査行列のサブブロックの行数（小数点以下は切り捨て）
+/* ================================================================
+ * 1. Generate regular (w_c, w_r) LDPC parity-check matrix (Gallager)
+ * ----------------------------------------------------------------
+ * Output: H[M][N] where M = N*(w_c/w_r)
+ * H は (w_c × サブブロック数) 個の行ブロックで構成される。
+ * 第一ブロックは連続した1、以降は列のランダムパーミュテーションで生成。
+ * ================================================================ */
+void generate_Hmatrix(int **H, int N, int wc, int wr) {
+  int i, j, k;
+  int M = (N * wc) / wr;   /* number of parity equations */
+  int block_rows = M / wc; /* rows per block (Gallager construction) */
 
-  // malloc関数（宣言）
-  int *perm; // 順列
-  perm = (int *)malloc(N * sizeof(int));
+  /* permutation buffer */
+  int *perm = (int *)malloc(N * sizeof(int));
+  if (!perm) {
+    fprintf(stderr, "malloc failed in generate_Hmatrix\n");
+    exit(1);
+  }
 
-  // クリーニング
-  for (i = 0; i < M; i++) {
+  /* Clear H matrix */
+  for (i = 0; i < M; i++)
+    for (j = 0; j < N; j++)
+      H[i][j] = 0;
+
+  /**
+   * Step 1: First block (identity-type pattern)
+   * Rows: 0 ... block_rows-1
+   * Columns: i*wr ... (i+1)*wr-1
+   */
+  for (i = 0; i < block_rows; i++) {
+    for (j = i * wr; j < (i + 1) * wr; j++) {
+      H[i][j] = 1;
+    }
+  }
+
+  /**
+   * Step 2: Remaining block rows are permutations of the first block
+   */
+  for (i = 1; i < wc; i++) {
+
+    /* generate identity permutation */
+    for (j = 0; j < N; j++)
+      perm[j] = j;
+
+    /* shuffle columns randomly */
     for (j = 0; j < N; j++) {
-      H_LDPC[i][j] = 0;
+      int r = rand() % N;
+      int tmp = perm[j];
+      perm[j] = perm[r];
+      perm[r] = tmp;
     }
-  }
 
-  // Gallager準備
-  for (i = 0; i < B_M; i++) {
-    for (j = i * w_r; j < w_r * (i + 1); j++) {
-      H_LDPC[i][j] = 1;
-    }
-  }
-
-  // Gallager法
-  for (i = 1; i < w_c; i++) {
-    // 整数を順番に格納
-    for (l = 0; l < N; l++) {
-      perm[l] = l;
-    }
-    // 列のランダム入れ替え
-    for (l = 0; l < N; l++) {
-      m = rand() % N;
-      buf = perm[l];
-      perm[l] = perm[m];
-      perm[m] = buf;
-    }
-    for (j = B_M * i; j < B_M * (i + 1); j++) {
+    /* apply permuted columns over next block */
+    for (j = block_rows * i; j < block_rows * (i + 1); j++) {
       for (k = 0; k < N; k++) {
-        H_LDPC[j][k] = H_LDPC[j - B_M * i][perm[k]];
+        H[j][k] = H[j - block_rows * i][perm[k]];
       }
     }
   }
 
-  // malloc関数（解放）
   free(perm);
 }
 
-//(N_LDPC*w_c/w_r)×(N_LDPC)の検査行列から(N_LDPC-N_LDPC*w_c/w_r)×(N_LDPC)の生成行列を生成
-void generate_Gmatrix(int **H_LDPC, int **G_LDPC, int N_LDPC, int w_c,
-                      int w_r) {
-  // ローカル変数の定義
-  int i, j, k, l;             // カウント用
-  int M = N_LDPC * w_c / w_r; // 検査行列の行数
-  int N = N_LDPC;             // 検査行列の列数
+/* ================================================================
+ * 2. Construct systematic generator matrix G from H
+ * ----------------------------------------------------------------
+ * Input:  H[M][N]
+ * Output: G[K][N] where K = N - M
+ *
+ * 方法：
+ *   [H^T | I_N] を拡張行列としてガウス消去し、
+ *   下側 K 行から右側 N 列部分を取り出して G を作る。
+ *
+ * 注意：元のアルゴリズムは温存（行・列交換も含む）
+ * ================================================================ */
+void generate_Gmatrix(int **H, int **G, int N, int wc, int wr) {
+  int M = (N * wc) / wr;
+  int K = N - M;
 
-  // malloc関数（宣言）
-  int **X; // 変形用行列X
-  X = (int **)malloc(N * sizeof(int *));
+  int i, j, k, l;
+
+  /* X: transformation matrix of size N × (M+N) */
+  int **X = (int **)malloc(N * sizeof(int *));
   for (i = 0; i < N; i++)
     X[i] = (int *)malloc((M + N) * sizeof(int));
 
-  int *X_rc; // 行コピー用
-  X_rc = (int *)malloc((M + N) * sizeof(int));
+  int *row_buf = (int *)malloc((M + N) * sizeof(int));
+  int *col_buf = (int *)malloc(N * sizeof(int));
+  int *Hcol_buf = (int *)malloc(M * sizeof(int));
 
-  int *X_cc; // 列コピー用
-  X_cc = (int *)malloc(N * sizeof(int));
-
-  int *H_cc; // 列コピー用
-  H_cc = (int *)malloc(M * sizeof(int));
-
-  // 検査行列H_LDPCの転置行列H^Tを変形行列Xの左側に格納
-  for (i = 0; i < N; i++) {
-    for (j = 0; j < M; j++) {
-      X[i][j] = H_LDPC[j][i];
-    }
+  if (!X || !row_buf || !col_buf || !Hcol_buf) {
+    fprintf(stderr, "malloc failed in generate_Gmatrix\n");
+    exit(1);
   }
 
-  // 変形行列Xの右側にN×N単位行列を格納
+  /* ------------------------------------------------------------
+   * Step 1: Construct extended matrix [H^T | I]
+   * ------------------------------------------------------------ */
   for (i = 0; i < N; i++) {
-    for (j = M; j < (M + N); j++) {
-      if (i == j - M)
-        X[i][j] = 1;
-      else
-        X[i][j] = 0;
-    }
+    for (j = 0; j < M; j++)
+      X[i][j] = H[j][i]; /* Left block = H^T */
+
+    for (j = M; j < M + N; j++)
+      X[i][j] = (i == (j - M)) ? 1 : 0; /* Right block = identity */
   }
 
-  // 変形行列Xの左側の変形（ここの列基本変形はHに影響しない）
+  /* ------------------------------------------------------------
+   * Step 2: Gaussian elimination on the left part of X
+   *         (Column swaps here DO NOT affect H)
+   * ------------------------------------------------------------ */
   for (j = 0; j < M; j++) {
-    if (X[j][j] == 1) {
-      for (i = 0; i < N; i++) {
-        if (i != j && X[i][j] == 1) {
-          for (k = 0; k < (M + N); k++) {
-            X[i][k] = X[i][k] ^ X[j][k]; // 排他的論理和
-          }
-        }
-      }
-    } else {
+    if (X[j][j] == 0) {
+      /* Find pivot row */
+      int pivot_found = 0;
       for (i = j + 1; i < N; i++) {
         if (X[i][j] == 1) {
-          for (k = 0; k < (M + N); k++) {
-            X_rc[k] = X[i][k]; // i行のコピー
-            X[i][k] = X[j][k]; // 行交換j→i
-            X[j][k] = X_rc[k]; // 行交換i→j
-          }
+          memcpy(row_buf, X[i], (M + N) * sizeof(int));
+          memcpy(X[i], X[j], (M + N) * sizeof(int));
+          memcpy(X[j], row_buf, (M + N) * sizeof(int));
+          pivot_found = 1;
           break;
-        } else if (i == N - 1) {
-          for (k = (M + N) - 1; k > j; k--) {
-            if (X[j][k] == 1) {
-              for (l = 0; l < N; l++) {
-                X_cc[l] = X[l][k]; // 列のコピー
-                X[l][k] = X[l][j]; // 列交換j→k
-                X[l][j] = X_cc[l]; // 列交換k→j
-              }
-              break;
-            }
-          }
         }
       }
-      for (i = 0; i < N; i++) {
-        if (i != j && X[i][j] == 1) {
-          for (k = 0; k < (M + N); k++) {
-            X[i][k] = X[i][k] ^ X[j][k]; // 排他的論理和
+      /* If pivot row not found, swap columns */
+      if (!pivot_found) {
+        for (k = M + N - 1; k > j; k--) {
+          if (X[j][k] == 1) {
+            for (l = 0; l < N; l++) {
+              col_buf[l] = X[l][k];
+              X[l][k] = X[l][j];
+              X[l][j] = col_buf[l];
+            }
+            break;
           }
         }
       }
     }
+
+    /* row elimination */
+    for (i = 0; i < N; i++) {
+      if (i != j && X[i][j] == 1) {
+        for (k = 0; k < (M + N); k++)
+          X[i][k] ^= X[j][k]; /* XOR */
+      }
+    }
   }
 
-  // 変形行列Xの右側の変形（ここの列基本変形はHに影響する）
-  for (j = 2 * M; j < (M + N); j++) {
-    if (X[j - M][j] == 1) {
-      for (i = 0; i < N; i++) {
-        if (i != (j - M) && X[i][j] == 1) {
-          for (k = 0; k < (M + N); k++) {
-            X[i][k] = X[i][k] ^ X[j - M][k]; // 排他的論理和
-          }
-        }
-      }
-    } else {
-      for (i = j - M; i < N; i++) {
+  /* ------------------------------------------------------------
+   * Step 3: Elimination that affects both X and H (column swaps)
+   * ------------------------------------------------------------ */
+  for (j = 2 * M; j < M + N; j++) {
+
+    int pivot_row = j - M;
+
+    if (X[pivot_row][j] == 0) {
+
+      /* find pivot row */
+      int found = 0;
+      for (i = pivot_row + 1; i < N; i++) {
         if (X[i][j] == 1) {
-          for (k = 0; k < (M + N); k++) {
-            X_rc[k] = X[i][k];     // i行のコピー
-            X[i][k] = X[j - M][k]; // 行交換(j-M)→i
-            X[j - M][k] = X_rc[k]; // 行交換i→(j-M)
-          }
+          memcpy(row_buf, X[i], (M + N) * sizeof(int));
+          memcpy(X[i], X[pivot_row], (M + N) * sizeof(int));
+          memcpy(X[pivot_row], row_buf, (M + N) * sizeof(int));
+          found = 1;
           break;
-        } else if (i == N - 1) {
-          for (k = (M + N) - 1; k > M - 1; k--) {
-            if (X[j - M][k] == 1) {
-              for (l = 0; l < N; l++) {
-                X_cc[l] = X[l][k]; // 列のコピー
-                X[l][k] = X[l][j]; // 列交換j→k
-                X[l][j] = X_cc[l]; // 列交換k→j
-              }
-              for (l = 0; l < M; l++) {
-                H_cc[l] = H_LDPC[l][k - M];          // 列のコピー
-                H_LDPC[l][k - M] = H_LDPC[l][j - M]; // 列交換(j-M)→k
-                H_LDPC[l][j - M] = H_cc[l];          // 列交換k→(j-M)
-              } // 検査行列H_LDPCもXの右側と同様に列交換を行う
-              break;
+        }
+      }
+
+      /* pivot row not found ⇒ column swap (affects H also) */
+      if (!found) {
+        for (k = (M + N) - 1; k > M - 1; k--) {
+          if (X[pivot_row][k] == 1) {
+
+            /* swap columns in X */
+            for (l = 0; l < N; l++) {
+              col_buf[l] = X[l][k];
+              X[l][k] = X[l][j];
+              X[l][j] = col_buf[l];
             }
-          }
-        }
-      }
-      for (i = 0; i < N; i++) {
-        if (i != (j - M) && X[i][j] == 1) {
-          for (k = 0; k < (M + N); k++) {
-            X[i][k] = X[i][k] ^ X[j - M][k]; // 排他的論理和
+
+            /* swap corresponding columns in H */
+            for (l = 0; l < M; l++) {
+              Hcol_buf[l] = H[l][k - M];
+              H[l][k - M] = H[l][j - M];
+              H[l][j - M] = Hcol_buf[l];
+            }
+
+            break;
           }
         }
       }
     }
-  }
 
-  // 生成行列G_LDPCの取り出し
-  for (i = M; i < N; i++) {
-    for (j = M; j < (M + N); j++) {
-      G_LDPC[i - M][j - M] = X[i][j];
+    /* eliminate other rows */
+    for (i = 0; i < N; i++) {
+      if (i != pivot_row && X[i][j] == 1) {
+        for (k = 0; k < M + N; k++)
+          X[i][k] ^= X[pivot_row][k];
+      }
     }
   }
 
-  // malloc関数（解放）
+  /* ------------------------------------------------------------
+   * Step 4: Extract generator matrix G  (K × N block)
+   * G = X[M...N-1][M...M+N-1]
+   * ------------------------------------------------------------ */
+  for (i = M; i < N; i++)
+    for (j = M; j < M + N; j++)
+      G[i - M][j - M] = X[i][j];
+
+  /* free memory */
   for (i = 0; i < N; i++)
     free(X[i]);
   free(X);
-  free(X_rc);
-  free(X_cc);
-  free(H_cc);
+  free(row_buf);
+  free(col_buf);
+  free(Hcol_buf);
 }
 
-// nの階乗
+/* ================================================================
+ * 3. Count 4-cycles in LDPC H matrix (structure analysis)
+ * ----------------------------------------------------------------
+ * 4-cycle = two variable nodes sharing ≥2 check nodes.
+ * This function counts all such cycles.
+ * ================================================================ */
 static int factorial(int n) {
-  // ローカル変数の定義
-  int i;      // カウント用
-  int fn = 1; // 階乗
-
-  for (i = 0; i <= n; i++) {
-    if (i == 0)
-      fn = 1;
-    else
-      fn *= i;
-  }
-
-  return fn;
+  int i, f = 1;
+  for (i = 1; i <= n; i++)
+    f *= i;
+  return f;
 }
 
-// 検査行列の4ループ数を計算する
-int count_floop(int **H_LDPC, int N_LDPC, int w_c, int w_r) {
-  // ローカル変数の定義
-  int i, j, k, l;             // カウント用
-  int M = N_LDPC * w_c / w_r; // 検査行列H_LDPCの行数
-  int N = N_LDPC;             // 検査行列H_LDPCの列
-  int mt;                     // 一致数
-  int fl;                     // 4ループ数
+int count_floop(int **H, int N, int wc, int wr) {
+  int i, j, k, l;
+  int M = (N * wc) / wr;
 
-  // malloc関数（宣言）
-  int **vn; // 変数ノード
-  vn = (int **)malloc(N * sizeof(int *));
+  int **var_nodes = (int **)malloc(N * sizeof(int *));
   for (i = 0; i < N; i++)
-    vn[i] = (int *)malloc(w_c * sizeof(int));
+    var_nodes[i] = (int *)malloc(wc * sizeof(int));
 
-  // 変数ノードの作成
+  /* Construct variable-node adjacency list */
   for (j = 0; j < N; j++) {
-    k = 0;
+    int idx = 0;
     for (i = 0; i < M; i++) {
-      if (H_LDPC[i][j] == 1) {
-        vn[j][k] = i;
-        k++;
-        if (k == w_c)
-          break; // forから出る
+      if (H[i][j]) {
+        var_nodes[j][idx++] = i;
+        if (idx == wc)
+          break;
       }
     }
   }
 
-  // 4ループ数の計算
-  fl = 0;
+  int floop = 0;
+
+  /* Count pairs of columns that share check nodes */
   for (i = 0; i < N - 1; i++) {
     for (j = i + 1; j < N; j++) {
-      mt = 0;
-      for (k = 0; k < w_c; k++) {
-        for (l = 0; l < w_c; l++) {
-          if (vn[i][k] == vn[j][l])
-            mt++;
-        }
-      }
-      if (mt <= 1)
-        fl += 0;
-      else if (mt == 2)
-        fl += 1;
-      else
-        fl +=
-            factorial(mt) / factorial(mt - 2) / 2; // mt個から2個選ぶ組み合わせ
+      int shared = 0;
+      for (k = 0; k < wc; k++)
+        for (l = 0; l < wc; l++)
+          if (var_nodes[i][k] == var_nodes[j][l])
+            shared++;
+
+      if (shared >= 2)
+        floop += factorial(shared) / (2 * factorial(shared - 2));
     }
   }
 
-  // malloc関数（解放）
+  /* free */
   for (i = 0; i < N; i++)
-    free(vn[i]);
-  free(vn);
+    free(var_nodes[i]);
+  free(var_nodes);
 
-  return fl;
+  return floop;
 }

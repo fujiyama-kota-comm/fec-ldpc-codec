@@ -1,14 +1,34 @@
 #ifndef LDPC_ENCODER_H
 #define LDPC_ENCODER_H
 
-// --------------------------------------------
-// Function prototypes
-// --------------------------------------------
+/* =====================================================================
+ * LDPC Encoder (Generator-matrix based)
+ *
+ * Performs:
+ *      c = u × G   over GF(2)
+ *
+ * Inputs:
+ *      inf[K]  : information bits   (0/1)
+ *      G[K][N] : generator matrix
+ *      N       : codeword length
+ *      K       : information length
+ *
+ * Output:
+ *      ecc[N]  : encoded LDPC codeword
+ * ===================================================================== */
 
-// LDPC 検査行列 H と 生成行列 G の読み込み
-void init_LDPC(int **H, int **G, int N_LDPC, int w_c, int w_r);
-
-// LDPC 符号化 ecc = inf × G
-void encode_LDPC(int *inf, int *ecc, int **G, int N_LDPC, int K_LDCP);
-
+#ifdef __cplusplus
+extern "C" {
 #endif
+
+/* ---------------------------------------------------------
+ * ecc[i] = XOR_j (inf[j] & G[j][i])
+ * GF(2) linear encoding
+ * --------------------------------------------------------- */
+void ldpc_encode(int *ecc, const int *inf, int **G, int N, int K);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LDPC_ENCODER_H */
