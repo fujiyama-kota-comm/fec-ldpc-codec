@@ -1,5 +1,5 @@
 CC      = gcc
-CFLAGS  = -O2 -Wall -std=c99 -Iinclude
+CFLAGS  = -O2 -Wall -std=gnu11 -Iinclude
 LDFLAGS = -lm
 
 # ============================================================

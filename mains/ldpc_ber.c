@@ -167,7 +167,7 @@ int main(void) {
   int **H = alloc_matrix_int(M, N);
   int **G = alloc_matrix_int(K, N);
 
-  char path_H[256], path_G[256];
+  char path_H[512], path_G[512];
   snprintf(path_H, sizeof(path_H), "%s/H.csv", folder);
   snprintf(path_G, sizeof(path_G), "%s/G.csv", folder);
 
